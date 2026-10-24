@@ -3,80 +3,33 @@ package wasm_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/soroworks/sorovault/internal/wasm"
 	"github.com/soroworks/sorovault/internal/wasm/wasmtest"
 )
 
 // FuzzCustomSections ensures the WASM custom-section reader never panics on
-// untrusted input. It feeds arbitrary bytes to the section reader and verifies
-// no panics or unbounded allocations occur.
+// untrusted input. The seeds cover the shapes that reach each branch of the
+// reader; the fuzzer mutates the raw module bytes from there.
 func FuzzCustomSections(f *testing.F) {
-	f.Add("short module")
-	f.Add("random bytes")
-	f.Add("valid with spec section")
-	f.Add("valid with meta section")
-	f.Add("empty module")
-	f.Add("only header")
-	f.Add("name length overruns")
-	f.Add("invalid utf8 in name")
-	f.Add("truncated name")
-	f.Add("name exceeds max length")
+	header := []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00}
 
-	f.Fuzz(func(t *testing.T, input string) {
-		t.Parallel()
+	f.Add([]byte{})                                        // empty module
+	f.Add([]byte{0x00, 0x61, 0x73, 0x6D, 0x01})            // short module
+	f.Add(header)                                          // only the header
+	f.Add(append(append([]byte{}, header...), 0xff))       // trailing garbage
+	f.Add(append(append([]byte{}, header...), 0x00, 0x10)) // section length overruns
+	f.Add(wasmtest.Module(wasmtest.Section{Name: wasm.SectionContractSpec, Body: []byte{0x01}}))
+	f.Add(wasmtest.Module(
+		wasmtest.Section{Name: wasm.SectionContractSpec, Body: []byte{0x01}},
+		wasmtest.Section{Name: wasm.SectionContractMeta, Body: []byte{0x02}},
+	))
+	f.Add(wasmtest.ModuleWithNonCustom(1, []byte{0x00}, wasmtest.Section{Name: wasm.SectionContractEnvMeta}))
+	// A custom section whose name claims more bytes than the section holds.
+	f.Add(append(append([]byte{}, header...), 0x00, 0x03, 0x05, 'a', 'b'))
 
-		var module []byte
-		switch input {
-		case "short module":
-			module = []byte{0x00, 0x61, 0x73, 0x6D, 0x01} // header only
-		case "random bytes":
-			module = []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0xff, 0xfe, 0xfd}
-		case "valid with spec section":
-			module = wasmtest.Module(wasmtest.Section{
-				Name: wasm.SectionContractSpec,
-				Body: []byte{0x01}, // valid name byte
-			})
-		case "valid with meta section":
-			module = wasmtest.Module(wasmtest.Section{
-				Name: wasm.SectionContractSpec,
-				Body: []byte{0x01},
-			})
-			module = wasmtest.Module(wasmtest.Section{
-				Name: wasm.SectionContractMeta,
-				Body: []byte{0x02},
-			})
-		case "empty module":
-			module = []byte{0x00, 0x61, 0x73, 0x6D, 0x01}
-		case "only header":
-			module = []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00}
-		case "name length overruns":
-			// name length says 256 bytes but only a few follow
-			module = []byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x10, 0x00} // 16 bytes claimed
-		case "invalid utf8 in name":
-			// length prefix says 1 byte, but the byte is a continuation byte
-			module = wasmtest.Module(wasmtest.Section{
-				Name: wasm.SectionContractSpec,
-				Body: []byte{0x80}, // invalid UTF-8
-			})
-		case "truncated name":
-			// length prefix says 5 bytes, but only 3 follow
-			module = wasmtest.Module(wasmtest.Section{
-				Name: wasm.SectionContractSpec,
-				Body: []byte{0x03, 0x01, 0x02}, // only 3 bytes after length
-			})
-		case "name exceeds max length":
-			// name length says 1000 bytes (exceeds maxSectionNameLen)
-			module = wasmtest.Module(wasmtest.Section{
-				Name: wasm.SectionContractSpec,
-				Body: make([]byte, 1000), // 1000 bytes claimed as name
-			})
-		}
-
-		// This must not panic
-		_, err := wasm.CustomSection(module, wasm.SectionContractSpec)
-		// Accept either success or any error, but no panic
-		_ = err
+	f.Fuzz(func(t *testing.T, module []byte) {
+		// Either result is acceptable; a panic or hang is not.
+		_, _ = wasm.CustomSection(module, wasm.SectionContractSpec)
+		_, _ = wasm.CustomSectionNames(module)
 	})
 }
